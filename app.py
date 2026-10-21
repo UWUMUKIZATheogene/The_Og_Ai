@@ -185,6 +185,38 @@ def _client(key, base_url):
 
 
 @st.cache_resource(show_spinner=False)
+def _anthropic_client(key):
+    import anthropic  # SDK nyayo ya Claude
+
+    return anthropic.Anthropic(api_key=key, timeout=60.0, max_retries=0)
+
+
+def to_anthropic(messages):
+    """Guhindura 'messages' (OpenAI format) zikajya mu format ya Claude: (system, messages)."""
+    system_parts, out = [], []
+    for m in messages:
+        if m["role"] == "system":
+            system_parts.append(m["content"])
+            continue
+        content = m["content"]
+        if isinstance(content, list):
+            blocks = []
+            for part in content:
+                if part.get("type") == "text":
+                    blocks.append({"type": "text", "text": part["text"]})
+                elif part.get("type") == "image_url":
+                    url = part["image_url"]["url"]
+                    head, data = url.split(",", 1)
+                    media = head.split(";")[0].replace("data:", "") or "image/jpeg"
+                    blocks.append({"type": "image", "source": {"type": "base64", "media_type": media, "data": data}})
+            content = blocks
+        if not content:
+            continue
+        out.append({"role": m["role"], "content": content})
+    return "\n\n".join(system_parts), out
+
+
+@st.cache_resource(show_spinner=False)
 def _bad_registry():
     return {}
 
@@ -487,16 +519,26 @@ def chat_stream(messages, vision=False):
     for c in cands:
         got = False
         try:
-            stream = _client(c.key, c.base_url).chat.completions.create(
-                model=c.model, messages=messages, stream=True
-            )
-            for chunk in stream:
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta.content
-                if delta:
-                    got = True
-                    yield delta
+            if c.provider == "anthropic":  # Claude: inzira nyayo (native)
+                system, amsgs = to_anthropic(messages)
+                with _anthropic_client(c.key).messages.stream(
+                    model=c.model, max_tokens=2048, system=system, messages=amsgs
+                ) as stream:
+                    for delta in stream.text_stream:
+                        if delta:
+                            got = True
+                            yield delta
+            else:
+                stream = _client(c.key, c.base_url).chat.completions.create(
+                    model=c.model, messages=messages, stream=True
+                )
+                for chunk in stream:
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta.content
+                    if delta:
+                        got = True
+                        yield delta
             if got:
                 st.session_state["last_ok"] = True
                 return
